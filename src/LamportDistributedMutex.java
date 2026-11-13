@@ -8,17 +8,19 @@ public class LamportDistributedMutex {
     static class CanalReseau {
         private final Random random = new Random();
         private final AtomicInteger compteurMessages = new AtomicInteger(0);
+        private final ScheduledExecutorService facteur = Executors.newSingleThreadScheduledExecutor();
+        private final Map<String, Long> derniereLivraison = new HashMap<>();
 
-        public void envoyerMessage(Processus src, Processus dest, Message msg) {
+        public synchronized void envoyerMessage(Processus src, Processus dest, Message msg) {
             compteurMessages.incrementAndGet();
             int delai = 300 + random.nextInt(500);
-            new Thread(() -> {
-                try {
-                    Thread.sleep(delai);
-                    dest.recevoirMessage(msg);
-                } catch (InterruptedException ignored) {
-                }
-            }).start();
+            String lien = src.id + "->" + dest.id;
+            long livraison = System.currentTimeMillis() + delai;
+            long precedente = derniereLivraison.getOrDefault(lien, 0L);
+            if (livraison <= precedente) livraison = precedente + 1;
+            derniereLivraison.put(lien, livraison);
+            facteur.schedule(() -> dest.recevoirMessage(msg),
+                    livraison - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
         }
 
         public int getNombreMessages() {
@@ -47,9 +49,10 @@ public class LamportDistributedMutex {
         int horlogeLamport = 0;
         CanalReseau canal;
         List<Processus> autres;
-        boolean enPanne = false;
+        volatile boolean enPanne = false;
 
-        Queue<Message> fileRequetes = new ConcurrentLinkedQueue<>();
+        Queue<Message> fileRequetes = new PriorityBlockingQueue<>(10,
+                Comparator.comparingInt((Message m) -> m.horloge).thenComparingInt(m -> m.idSource));
         Set<Integer> reponsesRecues = ConcurrentHashMap.newKeySet();
 
         public Processus(int id, CanalReseau canal) {
@@ -61,7 +64,7 @@ public class LamportDistributedMutex {
             this.enPanne = enPanne;
         }
 
-        private void incrementerHorloge() {
+        private synchronized void incrementerHorloge() {
             horlogeLamport++;
         }
 
@@ -69,14 +72,15 @@ public class LamportDistributedMutex {
             horlogeLamport = Math.max(horlogeLamport, autreHorloge) + 1;
         }
 
-        public void diffuserMessage(TypeMessage type) {
+        public synchronized Message diffuserMessage(TypeMessage type) {
             incrementerHorloge();
             Message msg = new Message(type, horlogeLamport, id);
             for (Processus p : autres) {
-                if (!p.enPanne) {
+                if (p.id != id && !p.enPanne) {
                     canal.envoyerMessage(this, p, msg);
                 }
             }
+            return msg;
         }
 
         public synchronized void recevoirMessage(Message msg) {
@@ -107,17 +111,19 @@ public class LamportDistributedMutex {
         public void demanderSectionCritique() throws InterruptedException {
             if (enPanne) return;
 
-            System.out.println("P" + id + " demande la section critique");
-            incrementerHorloge();
-            fileRequetes.add(new Message(TypeMessage.REQUEST, horlogeLamport, id));
             reponsesRecues.clear();
-            diffuserMessage(TypeMessage.REQUEST);
+            Message demande = diffuserMessage(TypeMessage.REQUEST);
+            fileRequetes.add(demande);
+            System.out.println("P" + id + " demande la section critique (t=" + demande.horloge + ")");
 
-            while (reponsesRecues.size() < autres.size() - nbPannes()) {
+            while (reponsesRecues.size() < autres.size() - 1 - nbPannes()) {
+                if (enPanne) return;
                 Thread.sleep(200);
             }
 
             while (true) {
+                if (enPanne) return;
+                fileRequetes.removeIf(m -> trouverProcessus(m.idSource).enPanne);
                 Message premier = fileRequetes.peek();
                 if (premier != null && premier.idSource == id) break;
                 Thread.sleep(100);
@@ -146,7 +152,9 @@ public class LamportDistributedMutex {
 
         private void afficherFile() {
             System.out.print("File de P" + id + " : [");
-            fileRequetes.forEach(m -> System.out.print("P" + m.idSource + " "));
+            fileRequetes.stream()
+                    .sorted(Comparator.comparingInt((Message m) -> m.horloge).thenComparingInt(m -> m.idSource))
+                    .forEach(m -> System.out.print("P" + m.idSource + "@" + m.horloge + " "));
             System.out.println("]");
         }
 
@@ -187,5 +195,6 @@ public class LamportDistributedMutex {
         System.out.println("\n===== STATISTIQUES =====");
         System.out.println("Nombre total de messages échangés : " + canal.getNombreMessages());
         System.out.println("=========================");
+        System.exit(0);
     }
 }
