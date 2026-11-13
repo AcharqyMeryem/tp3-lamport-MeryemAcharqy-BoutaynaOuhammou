@@ -8,11 +8,18 @@ public class LamportDistributedMutex {
     static class CanalReseau {
         private final Random random = new Random();
         private final AtomicInteger compteurMessages = new AtomicInteger(0);
+        static final double PROBA_PERTE = 0.1;
+        private final AtomicInteger messagesPerdus = new AtomicInteger(0);
         private final ScheduledExecutorService facteur = Executors.newSingleThreadScheduledExecutor();
         private final Map<String, Long> derniereLivraison = new HashMap<>();
 
         public synchronized void envoyerMessage(Processus src, Processus dest, Message msg) {
             compteurMessages.incrementAndGet();
+            if (random.nextDouble() < PROBA_PERTE) {
+                messagesPerdus.incrementAndGet();
+                System.out.println("   [PERTE] " + msg.type + " de P" + src.id + " vers P" + dest.id + " perdu !");
+                return;
+            }
             int delai = 300 + random.nextInt(500);
             String lien = src.id + "->" + dest.id;
             long livraison = System.currentTimeMillis() + delai;
@@ -25,6 +32,10 @@ public class LamportDistributedMutex {
 
         public int getNombreMessages() {
             return compteurMessages.get();
+        }
+
+        public int getMessagesPerdus() {
+            return messagesPerdus.get();
         }
     }
 
@@ -112,12 +123,15 @@ public class LamportDistributedMutex {
             if (enPanne) return;
 
             reponsesRecues.clear();
+            blocageSignale = false;
             Message demande = diffuserMessage(TypeMessage.REQUEST);
             fileRequetes.add(demande);
             System.out.println("P" + id + " demande la section critique (t=" + demande.horloge + ")");
+            long debutAttente = System.currentTimeMillis();
 
             while (reponsesRecues.size() < autres.size() - 1 - nbPannes()) {
                 if (enPanne) return;
+                signalerBlocage(debutAttente, "il manque des REPLY");
                 Thread.sleep(200);
             }
 
@@ -126,11 +140,21 @@ public class LamportDistributedMutex {
                 fileRequetes.removeIf(m -> trouverProcessus(m.idSource).enPanne);
                 Message premier = fileRequetes.peek();
                 if (premier != null && premier.idSource == id) break;
+                if (premier != null)
+                    signalerBlocage(debutAttente, "P" + premier.idSource + " est toujours en tête de ma file");
                 Thread.sleep(100);
             }
 
             entrerSectionCritique();
             sortirSectionCritique();
+        }
+
+        private boolean blocageSignale = false;
+        private void signalerBlocage(long debutAttente, String raison) {
+            if (!blocageSignale && System.currentTimeMillis() - debutAttente > 4000) {
+                blocageSignale = true;
+                System.out.println("!!! P" + id + " BLOQUÉ depuis plus de 4 s : " + raison);
+            }
         }
 
         private long nbPannes() {
@@ -194,6 +218,7 @@ public class LamportDistributedMutex {
 
         System.out.println("\n===== STATISTIQUES =====");
         System.out.println("Nombre total de messages échangés : " + canal.getNombreMessages());
+        System.out.println("Nombre de messages perdus : " + canal.getMessagesPerdus());
         System.out.println("=========================");
         System.exit(0);
     }
