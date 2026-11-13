@@ -1,11 +1,13 @@
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class LamportDistributedMutex {
     private static final int NB_PROCESSUS = 3;
-    static final double PROBA_PANNE = 0.2;
+    static final double PROBA_PANNE = 0.0;
     static final AtomicInteger entreesSC = new AtomicInteger(0);
+    static final AtomicLong tempsAttenteTotal = new AtomicLong(0);
     static List<Processus> tous;
 
     static class CanalReseau {
@@ -64,6 +66,8 @@ public class LamportDistributedMutex {
         CanalReseau canal;
         List<Processus> autres;
         volatile boolean enPanne = false;
+        int nbEntrees = 0;
+        long attenteProcessus = 0;
 
         Queue<Message> fileRequetes = new PriorityBlockingQueue<>(10,
                 Comparator.comparingInt((Message m) -> m.horloge).thenComparingInt(m -> m.idSource));
@@ -148,7 +152,12 @@ public class LamportDistributedMutex {
                 Thread.sleep(100);
             }
 
-            entrerSectionCritique();
+            long attente = System.currentTimeMillis() - debutAttente;
+            nbEntrees++;
+            attenteProcessus += attente;
+            tempsAttenteTotal.addAndGet(attente);
+
+            entrerSectionCritique(attente);
             sortirSectionCritique();
         }
 
@@ -164,9 +173,9 @@ public class LamportDistributedMutex {
             return autres.stream().filter(p -> p.enPanne).count();
         }
 
-        private void entrerSectionCritique() throws InterruptedException {
+        private void entrerSectionCritique(long attente) throws InterruptedException {
             entreesSC.incrementAndGet();
-            System.out.println("P" + id + " entre en section critique (horloge=" + horlogeLamport + ")");
+            System.out.println("P" + id + " entre en section critique (horloge=" + horlogeLamport + ", attente=" + attente + " ms)");
             Thread.sleep(1000 + new Random().nextInt(1000));
         }
 
@@ -229,8 +238,13 @@ public class LamportDistributedMutex {
         System.out.println("Nombre total de messages échangés : " + canal.getNombreMessages());
         System.out.println("Nombre de messages perdus : " + canal.getMessagesPerdus());
         System.out.println("Nombre d'entrées en SC : " + entreesSC.get());
-        for (Processus p : tous)
-            System.out.println("P" + p.id + (p.enPanne ? " : EN PANNE" : " : actif"));
+        if (entreesSC.get() > 0)
+            System.out.println("Temps moyen d'attente : " + (tempsAttenteTotal.get() / entreesSC.get()) + " ms");
+        for (Processus p : tous) {
+            String moyenne = p.nbEntrees > 0 ? (p.attenteProcessus / p.nbEntrees) + " ms" : "-";
+            System.out.println("P" + p.id + (p.enPanne ? " : EN PANNE" : " : actif")
+                    + " | entrées = " + p.nbEntrees + " | attente moyenne = " + moyenne);
+        }
         System.out.println("=========================");
         System.exit(0);
     }
