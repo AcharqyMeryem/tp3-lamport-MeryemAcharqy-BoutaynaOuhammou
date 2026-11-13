@@ -4,7 +4,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class LamportDistributedMutex {
-    private static final int NB_PROCESSUS = 3;
+    static final int NB_PROCESSUS = 3;
+    static final int NB_ENTREES = 3;
     static final double PROBA_PANNE = 0.0;
     static final AtomicInteger entreesSC = new AtomicInteger(0);
     static final AtomicLong tempsAttenteTotal = new AtomicLong(0);
@@ -130,7 +131,6 @@ public class LamportDistributedMutex {
             if (enPanne) return;
 
             reponsesRecues.clear();
-            blocageSignale = false;
             Message demande = diffuserMessage(TypeMessage.REQUEST);
             fileRequetes.add(demande);
             System.out.println("P" + id + " demande la section critique (t=" + demande.horloge + ")");
@@ -138,7 +138,6 @@ public class LamportDistributedMutex {
 
             while (reponsesRecues.size() < autres.size() - 1 - nbPannes()) {
                 if (enPanne) return;
-                signalerBlocage(debutAttente, "il manque des REPLY");
                 Thread.sleep(200);
             }
 
@@ -147,8 +146,6 @@ public class LamportDistributedMutex {
                 fileRequetes.removeIf(m -> trouverProcessus(m.idSource).enPanne);
                 Message premier = fileRequetes.peek();
                 if (premier != null && premier.idSource == id) break;
-                if (premier != null)
-                    signalerBlocage(debutAttente, "P" + premier.idSource + " est toujours en tête de ma file");
                 Thread.sleep(100);
             }
 
@@ -159,14 +156,6 @@ public class LamportDistributedMutex {
 
             entrerSectionCritique(attente);
             sortirSectionCritique();
-        }
-
-        private boolean blocageSignale = false;
-        private void signalerBlocage(long debutAttente, String raison) {
-            if (!blocageSignale && System.currentTimeMillis() - debutAttente > 6000) {
-                blocageSignale = true;
-                System.out.println("!!! P" + id + " BLOQUÉ depuis plus de 6 s : " + raison);
-            }
         }
 
         private long nbPannes() {
@@ -199,7 +188,7 @@ public class LamportDistributedMutex {
         public void run() {
             try {
                 Random random = new Random();
-                while (!enPanne) {
+                while (!enPanne && nbEntrees < NB_ENTREES) {
                     demanderSectionCritique();
                     long vivants = tous.stream().filter(p -> !p.enPanne).count();
                     if (random.nextDouble() < PROBA_PANNE && vivants > 1) {
@@ -217,29 +206,36 @@ public class LamportDistributedMutex {
     public static void main(String[] args) throws InterruptedException {
         CanalReseau canal = new CanalReseau();
 
-        Processus p1 = new Processus(1, canal);
-        Processus p2 = new Processus(2, canal);
-        Processus p3 = new Processus(3, canal);
-
-        tous = Arrays.asList(p1, p2, p3);
+        tous = new ArrayList<>();
+        for (int i = 1; i <= NB_PROCESSUS; i++) {
+            tous.add(new Processus(i, canal));
+        }
         for (Processus p : tous) {
             p.autres = new ArrayList<>(tous);
         }
 
-        new Thread(p1).start();
-        new Thread(p2).start();
-        new Thread(p3).start();
+        System.out.println("Nombre de processus : " + NB_PROCESSUS + " | entrées par processus : " + NB_ENTREES);
 
-        System.out.println("Probabilité de panne : " + PROBA_PANNE);
-
-        Thread.sleep(18000);
+        List<Thread> threads = new ArrayList<>();
+        for (Processus p : tous) {
+            Thread t = new Thread(p);
+            threads.add(t);
+            t.start();
+        }
+        for (Thread t : threads) {
+            t.join();
+        }
+        Thread.sleep(1000);
 
         System.out.println("\n===== STATISTIQUES =====");
         System.out.println("Nombre total de messages échangés : " + canal.getNombreMessages());
         System.out.println("Nombre de messages perdus : " + canal.getMessagesPerdus());
         System.out.println("Nombre d'entrées en SC : " + entreesSC.get());
-        if (entreesSC.get() > 0)
+        if (entreesSC.get() > 0) {
             System.out.println("Temps moyen d'attente : " + (tempsAttenteTotal.get() / entreesSC.get()) + " ms");
+            System.out.println("Messages par entrée en SC : " + (canal.getNombreMessages() / entreesSC.get())
+                    + "  (théorie 3(N-1) = " + (3 * (NB_PROCESSUS - 1)) + ")");
+        }
         for (Processus p : tous) {
             String moyenne = p.nbEntrees > 0 ? (p.attenteProcessus / p.nbEntrees) + " ms" : "-";
             System.out.println("P" + p.id + (p.enPanne ? " : EN PANNE" : " : actif")
