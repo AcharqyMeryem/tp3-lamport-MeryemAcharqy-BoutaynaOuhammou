@@ -4,11 +4,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class LamportDistributedMutex {
     private static final int NB_PROCESSUS = 3;
+    static final double PROBA_PANNE = 0.2;
+    static final AtomicInteger entreesSC = new AtomicInteger(0);
+    static List<Processus> tous;
 
     static class CanalReseau {
         private final Random random = new Random();
         private final AtomicInteger compteurMessages = new AtomicInteger(0);
-        static final double PROBA_PERTE = 0.1;
+        static final double PROBA_PERTE = 0.0;
         private final AtomicInteger messagesPerdus = new AtomicInteger(0);
         private final ScheduledExecutorService facteur = Executors.newSingleThreadScheduledExecutor();
         private final Map<String, Long> derniereLivraison = new HashMap<>();
@@ -151,9 +154,9 @@ public class LamportDistributedMutex {
 
         private boolean blocageSignale = false;
         private void signalerBlocage(long debutAttente, String raison) {
-            if (!blocageSignale && System.currentTimeMillis() - debutAttente > 4000) {
+            if (!blocageSignale && System.currentTimeMillis() - debutAttente > 6000) {
                 blocageSignale = true;
-                System.out.println("!!! P" + id + " BLOQUÉ depuis plus de 4 s : " + raison);
+                System.out.println("!!! P" + id + " BLOQUÉ depuis plus de 6 s : " + raison);
             }
         }
 
@@ -162,6 +165,7 @@ public class LamportDistributedMutex {
         }
 
         private void entrerSectionCritique() throws InterruptedException {
+            entreesSC.incrementAndGet();
             System.out.println("P" + id + " entre en section critique (horloge=" + horlogeLamport + ")");
             Thread.sleep(1000 + new Random().nextInt(1000));
         }
@@ -185,8 +189,15 @@ public class LamportDistributedMutex {
         @Override
         public void run() {
             try {
+                Random random = new Random();
                 while (!enPanne) {
                     demanderSectionCritique();
+                    long vivants = tous.stream().filter(p -> !p.enPanne).count();
+                    if (random.nextDouble() < PROBA_PANNE && vivants > 1) {
+                        setEnPanne(true);
+                        System.out.println("XXX P" + id + " tombe en panne (aléatoire) !");
+                        break;
+                    }
                     Thread.sleep(2000);
                 }
             } catch (InterruptedException ignored) {
@@ -201,7 +212,7 @@ public class LamportDistributedMutex {
         Processus p2 = new Processus(2, canal);
         Processus p3 = new Processus(3, canal);
 
-        List<Processus> tous = Arrays.asList(p1, p2, p3);
+        tous = Arrays.asList(p1, p2, p3);
         for (Processus p : tous) {
             p.autres = new ArrayList<>(tous);
         }
@@ -210,15 +221,16 @@ public class LamportDistributedMutex {
         new Thread(p2).start();
         new Thread(p3).start();
 
-        Thread.sleep(8000);
-        System.out.println("P2 tombe en panne !");
-        p2.setEnPanne(true);
+        System.out.println("Probabilité de panne : " + PROBA_PANNE);
 
-        Thread.sleep(10000);
+        Thread.sleep(18000);
 
         System.out.println("\n===== STATISTIQUES =====");
         System.out.println("Nombre total de messages échangés : " + canal.getNombreMessages());
         System.out.println("Nombre de messages perdus : " + canal.getMessagesPerdus());
+        System.out.println("Nombre d'entrées en SC : " + entreesSC.get());
+        for (Processus p : tous)
+            System.out.println("P" + p.id + (p.enPanne ? " : EN PANNE" : " : actif"));
         System.out.println("=========================");
         System.exit(0);
     }
