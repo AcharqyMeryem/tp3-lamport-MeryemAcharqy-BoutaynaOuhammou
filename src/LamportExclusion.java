@@ -31,7 +31,7 @@ class Processus extends Thread {
         this.autres = autres;
     }
 
-    private void tick() {
+    private synchronized void tick() {
         clock++;
     }
 
@@ -48,29 +48,34 @@ class Processus extends Thread {
         fileMessages.add(m);
     }
 
-    private void broadcast(Message.Type type) {
+    private Message broadcast(Message.Type type) {
         tick();
         Message m = new Message(type, id, clock);
         for (Processus p : autres) {
             if (p.id != this.id)
                 envoyer(m, p);
         }
+        return m;
     }
 
     private void demandeSC() throws InterruptedException {
-        System.out.println("Processus " + id + " demande SC à t=" + clock);
-        tick();
-        Message demande = new Message(Message.Type.REQUEST, id, clock);
-        fileDemandes.add(demande);
-        broadcast(Message.Type.REQUEST);
         reponsesRecues.clear();
         reponsesRecues.add(id);
+        Message demande = broadcast(Message.Type.REQUEST);
+        fileDemandes.add(demande);
+        System.out.println("Processus " + id + " demande SC à t=" + demande.timestamp);
 
-        while (reponsesRecues.size() < autres.size()) {
+        while (reponsesRecues.size() < autres.size() || !estPremier()) {
             traiterMessages();
             Thread.sleep(100);
         }
         entrerSC();
+    }
+
+    private boolean estPremier() {
+        fileDemandes.sort(Comparator.comparingInt((Message m) -> m.timestamp)
+                                    .thenComparingInt(m -> m.senderId));
+        return !fileDemandes.isEmpty() && fileDemandes.get(0).senderId == id;
     }
 
     private void entrerSC() throws InterruptedException {
@@ -118,6 +123,10 @@ class Processus extends Thread {
             for (int i = 0; i < 3; i++) {
                 Thread.sleep(500 + new Random().nextInt(1000));
                 demandeSC();
+            }
+            for (int i = 0; i < 100; i++) {
+                traiterMessages();
+                Thread.sleep(100);
             }
         } catch (InterruptedException e) {
             e.printStackTrace();
